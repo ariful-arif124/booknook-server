@@ -13,12 +13,35 @@ class BorrowError extends Error {
   }
 }
 
+const isValidId = (id) => /^[a-fA-F0-9]{24}$/.test(id);
+
+router.get("/", verifyToken, async (req, res) => {
+  try {
+    const borrows = await getDB()
+      .collection("borrows")
+      .find({
+        userId: req.user.id,
+      })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return res.status(200).json(borrows);
+  } catch (error) {
+    console.error("Failed to fetch borrows:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to fetch borrowed books.",
+    });
+  }
+});
+
 router.post("/", verifyToken, async (req, res) => {
   const { bookId } = req.body || {};
 
   if (
     typeof bookId !== "string" ||
-    !/^[a-fA-F0-9]{24}$/.test(bookId)
+    !isValidId(bookId)
   ) {
     return res.status(400).json({
       success: false,
@@ -38,12 +61,8 @@ router.post("/", verifyToken, async (req, res) => {
         const objectId = new ObjectId(bookId);
 
         const book = await booksCollection.findOne(
-          {
-            _id: objectId,
-          },
-          {
-            session,
-          }
+          { _id: objectId },
+          { session }
         );
 
         if (!book) {
@@ -57,9 +76,7 @@ router.post("/", verifyToken, async (req, res) => {
               userId: req.user.id,
               status: "borrowed",
             },
-            {
-              session,
-            }
+            { session }
           );
 
         if (existingBorrow) {
@@ -83,18 +100,12 @@ router.post("/", verifyToken, async (req, res) => {
           await booksCollection.updateOne(
             {
               _id: objectId,
-              availableCopies: {
-                $gt: 0,
-              },
+              availableCopies: { $gt: 0 },
             },
             {
-              $inc: {
-                availableCopies: -1,
-              },
+              $inc: { availableCopies: -1 },
             },
-            {
-              session,
-            }
+            { session }
           );
 
         if (updateResult.modifiedCount !== 1) {
@@ -126,9 +137,7 @@ router.post("/", verifyToken, async (req, res) => {
         const insertResult =
           await borrowsCollection.insertOne(
             newBorrow,
-            {
-              session,
-            }
+            { session }
           );
 
         return {
@@ -138,12 +147,8 @@ router.post("/", verifyToken, async (req, res) => {
       },
       {
         readPreference: "primary",
-        readConcern: {
-          level: "snapshot",
-        },
-        writeConcern: {
-          w: "majority",
-        },
+        readConcern: { level: "snapshot" },
+        writeConcern: { w: "majority" },
       }
     );
 
@@ -172,6 +177,149 @@ router.post("/", verifyToken, async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Unable to borrow the book.",
+    });
+  } finally {
+    await session.endSession();
+  }
+});
+
+router.delete("/:id", verifyToken, async (req, res) => {
+  const { id } = req.params;
+
+  if (!isValidId(id)) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid borrowing ID.",
+    });
+  }
+
+  const session = getClient().startSession();
+
+  try {
+    const result = await session.withTransaction(
+      async () => {
+        const db = getDB();
+        const borrowsCollection = db.collection("borrows");
+        const booksCollection = db.collection("books");
+
+        const borrow = await borrowsCollection.findOne(
+          {
+            _id: new ObjectId(id),
+            userId: req.user.id,
+          },
+          { session }
+        );
+
+        if (!borrow) {
+          throw new BorrowError(
+            404,
+            "Borrowing record not found."
+          );
+        }
+
+        if (borrow.status !== "borrowed") {
+          throw new BorrowError(
+            409,
+            "This book has already been returned."
+          );
+        }
+
+        const book = await booksCollection.findOne(
+          { _id: borrow.bookId },
+          { session }
+        );
+
+        if (!book) {
+          throw new BorrowError(
+            409,
+            "The borrowed book no longer exists."
+          );
+        }
+
+        const now = new Date();
+
+        const borrowUpdate =
+          await borrowsCollection.updateOne(
+            {
+              _id: borrow._id,
+              userId: req.user.id,
+              status: "borrowed",
+            },
+            {
+              $set: {
+                status: "returned",
+                returnedAt: now,
+                actualReturnDate: now
+                  .toISOString()
+                  .slice(0, 10),
+              },
+            },
+            { session }
+          );
+
+        if (borrowUpdate.modifiedCount !== 1) {
+          throw new BorrowError(
+            409,
+            "This book has already been returned."
+          );
+        }
+
+        const bookUpdate = await booksCollection.updateOne(
+          {
+            _id: borrow.bookId,
+            totalCopies: book.totalCopies,
+            availableCopies: {
+              $gte: 0,
+              $lt: book.totalCopies,
+            },
+          },
+          {
+            $inc: { availableCopies: 1 },
+          },
+          { session }
+        );
+
+        if (bookUpdate.modifiedCount !== 1) {
+          throw new BorrowError(
+            409,
+            "Unable to restore the book inventory."
+          );
+        }
+
+        return {
+          ...borrow,
+          status: "returned",
+          returnedAt: now,
+          actualReturnDate: now
+            .toISOString()
+            .slice(0, 10),
+        };
+      },
+      {
+        readPreference: "primary",
+        readConcern: { level: "snapshot" },
+        writeConcern: { w: "majority" },
+      }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Book returned successfully.",
+      borrow: result,
+    });
+  } catch (error) {
+    if (error instanceof BorrowError) {
+      return res.status(error.statusCode).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
+    console.error("Return failed:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to return the book.",
     });
   } finally {
     await session.endSession();
