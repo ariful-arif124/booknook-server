@@ -18,9 +18,25 @@ let database;
 async function connectDB() {
   await client.connect();
 
-  database = client.db("booknook");
+  const db = client.db("booknook");
 
-  await database.command({ ping: 1 });
+  await db.command({ ping: 1 });
+
+  await db.collection("borrows").createIndex(
+    {
+      userId: 1,
+      bookId: 1,
+    },
+    {
+      unique: true,
+      partialFilterExpression: {
+        status: "borrowed",
+      },
+      name: "unique_active_book_borrow",
+    }
+  );
+
+  database = db;
 
   console.log("MongoDB Atlas connected successfully");
 
@@ -35,7 +51,16 @@ function getDB() {
   return database;
 }
 
+function getClient() {
+  if (!database) {
+    throw new Error("Database is not connected");
+  }
+
+  return client;
+}
+
 module.exports = {
   connectDB,
   getDB,
+  getClient,
 };

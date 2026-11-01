@@ -5,6 +5,7 @@ const express = require("express");
 const cors = require("cors");
 const { connectDB, getDB } = require("./db");
 const booksRouter = require("./routes/books");
+const borrowsRouter = require("./routes/borrows");
 
 const app = express();
 
@@ -41,6 +42,7 @@ app.get("/health", async (req, res) => {
 });
 
 app.use("/books", booksRouter);
+app.use("/borrows", borrowsRouter);
 
 connectDB()
   .then(() => {
