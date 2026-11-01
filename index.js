@@ -4,6 +4,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const { connectDB, getDB } = require("./db");
+const booksRouter = require("./routes/books");
 
 const app = express();
 
@@ -39,9 +40,7 @@ app.get("/health", async (req, res) => {
   }
 });
 
-app.get("/books", (req, res) => {
-  res.json([]);
-});
+app.use("/books", booksRouter);
 
 connectDB()
   .then(() => {
@@ -52,6 +51,10 @@ connectDB()
     });
   })
   .catch((error) => {
-    console.error("Database connection failed:", error.message);
+    console.error(
+      "Database connection failed:",
+      error.message
+    );
+
     process.exit(1);
   });
